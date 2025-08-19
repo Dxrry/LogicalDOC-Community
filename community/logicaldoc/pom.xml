@@ -105,4 +105,12 @@
         <module>logicaldoc-webapp</module>
         <module>logicaldoc-webservicesamples</module>
     </modules>
+    <repositories>
+        <repository>
+            <id>restlet</id>
+            <url>https://maven.restlet.talend.com</url>
+            <releases><enabled>true</enabled></releases>
+            <snapshots><enabled>true</enabled></snapshots>
+        </repository>
+    </repositories>
 </project>
