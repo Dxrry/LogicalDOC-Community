@@ -17,10 +17,19 @@ import com.logicaldoc.core.document.Document;
 import com.logicaldoc.core.document.Version;
 import com.logicaldoc.core.document.dao.DocumentDAO;
 import com.logicaldoc.core.document.dao.VersionDAO;
+import com.logicaldoc.core.store.Storer;
+
 import com.logicaldoc.core.security.Session;
 import com.logicaldoc.util.Context;
 import com.logicaldoc.web.util.ServletUtil;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.IOException;
+
+import com.logicaldoc.util.io.FileUtil;
 /**
  * This servlet simply download the document it is a PDF.
  * 
@@ -36,6 +45,8 @@ public class ConvertPdf extends HttpServlet {
 	private static final long serialVersionUID = 1L;
 
 	protected static Logger log = LoggerFactory.getLogger(ConvertPdf.class);
+
+	public static final String PDF_CONVERSION_SUFFIX = "conversion.pdf";
 
 	/**
 	 * Constructor of the object.
@@ -60,26 +71,82 @@ public class ConvertPdf extends HttpServlet {
 
 		DocumentDAO docDao = (DocumentDAO) Context.get().getBean(DocumentDAO.class);
 		VersionDAO versionDao = (VersionDAO) Context.get().getBean(VersionDAO.class);
+		Storer storer = (Storer) Context.get().getBean(Storer.class);
 
 		try {
-			long docId = Long.parseLong(request.getParameter(DOCUMENT_ID));
-			Document document = docDao.findById(docId);
-			if (document.getDocRef() != null)
+			long documentId = Long.parseLong(request.getParameter(DOCUMENT_ID));
+			Document document = docDao.findById(documentId);
+			if (document.getDocRef() != null) {
 				document = docDao.findById(document.getDocRef());
+			}
 
-			if (!document.getFileName().toLowerCase().endsWith(".pdf"))
-				throw new Exception("Unsupported format");
+			String versionCode = StringUtils.defaultIfEmpty(request.getParameter(VERSION), document.getVersion());
+			Version version = versionDao.findByVersion(document.getId(), versionCode);
+			String resourceOrig = storer.getResourceName(document, version.getFileVersion(), null);
+			String resourceName = storer.getResourceName(document, version.getFileVersion(), PDF_CONVERSION_SUFFIX);
+			boolean resourceExists = storer.exists(document.getId(), resourceName);
+			boolean isPdf = document.getFileName().toLowerCase().endsWith(".pdf");
 
-			String ver = document.getVersion();
-			if (StringUtils.isNotEmpty(request.getParameter(VERSION)))
-				ver = request.getParameter(VERSION);
-			Version version = versionDao.findByVersion(docId, ver);
+			File tempInput = null;
+			File tempOutput = null;
 
-			String suffix = null;
+			if (!resourceExists && !document.getFileName().toLowerCase().endsWith(".pdf")) {
+				String fileName = document.getFileName().toLowerCase();
 
-			// Download the already stored resource
-			ServletUtil.downloadDocument(request, response, null, document.getId(), version.getFileVersion(), null,
-					suffix, session.getUser());
+				if (fileName.endsWith(".doc") || fileName.endsWith(".docx") ||
+					fileName.endsWith(".odt") || fileName.endsWith(".xls") ||
+					fileName.endsWith(".xlsx") || fileName.endsWith(".ppt") ||
+					fileName.endsWith(".pptx")) {
+
+					try {
+						tempInput = File.createTempFile("res-", ".cache");
+						storer.writeToFile(document.getId(), resourceOrig, tempInput);
+
+						tempOutput = File.createTempFile("res-", ".pdf");
+						String outputDir = tempOutput.getParent();
+
+						ProcessBuilder pb = new ProcessBuilder(
+								"/usr/bin/libreoffice",
+								"--headless",
+								"--convert-to", "pdf",
+								tempInput.getAbsolutePath(),
+								"--outdir", outputDir
+						);
+
+						pb.redirectErrorStream(true);
+						Process process = pb.start();
+						int exitCode = process.waitFor();
+
+						File generatedPdf = new File(outputDir, tempInput.getName().replaceFirst("\\.cache$", ".pdf"));
+
+						if (exitCode == 0 && generatedPdf.exists()) {
+							storer.store(generatedPdf, document.getId(), resourceName);
+						} else {
+							try (InputStream is = ConvertPdf.class.getResourceAsStream("/pdf/notavailable.pdf")) {
+								if (is == null) throw new Exception("Failed to find notavailable.pdf.");
+								storer.store(is, document.getId(), resourceName);
+							}
+						}
+
+					} catch (Exception e) {
+						throw new Exception("Failed generate preview.", e);
+					} finally {
+						if (tempInput != null) FileUtil.strongDelete(tempInput);
+						if (tempOutput != null) FileUtil.strongDelete(tempOutput);
+					}
+				}
+			}
+
+
+			if (resourceExists) {
+				ServletUtil.downloadDocument(request, response, null, document.getId(), version.getFileVersion(), null, PDF_CONVERSION_SUFFIX, session.getUser());
+			} else {
+				if (!isPdf) {
+					throw new Exception("Unsupported format: only PDF files are supported for this operation.");
+				}
+				ServletUtil.downloadDocument(request, response, null, document.getId(), version.getFileVersion(), null, null, session.getUser());
+			}
+
 		} catch (Throwable r) {
 			log.error(r.getMessage(), r);
 
